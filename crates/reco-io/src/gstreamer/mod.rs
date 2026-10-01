@@ -10,7 +10,12 @@
 //! Pipelines output I420 (YUV420P) or NV12 via `appsink`. NV12
 //! is the native NVIDIA ISP output, avoiding format conversion
 //! on Jetson for lower latency.
+//!
+//! [`encoder`] provides hardware encode through a GStreamer pipeline
+//! (`appsrc -> v4l2h264enc -> mux -> filesink`), selected with
+//! `--encoder gst-v4l2h264`.
 
 pub mod camera;
+pub mod encoder;
 #[cfg(target_os = "linux")]
 pub mod nvmm;

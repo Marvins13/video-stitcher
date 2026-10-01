@@ -1656,7 +1656,7 @@ impl SilentAudio {
 /// Scale a 1080p-tuned bitrate ceiling (Mbps) by output pixel count, so
 /// higher resolutions get a proportionally higher cap. Clamped to
 /// [0.5x, 8x] of the 1080p baseline; always >= 1 Mbps.
-fn scale_bitrate_mbps(base_mbps: u32, width: u32, height: u32) -> u32 {
+pub(crate) fn scale_bitrate_mbps(base_mbps: u32, width: u32, height: u32) -> u32 {
     let scale = (f64::from(width) * f64::from(height) / (1920.0 * 1080.0)).clamp(0.5, 8.0);
     ((f64::from(base_mbps) * scale).round() as u32).max(1)
 }
