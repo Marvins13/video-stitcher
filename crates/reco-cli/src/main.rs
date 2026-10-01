@@ -157,7 +157,8 @@ enum Commands {
         #[arg(long)]
         max_frames: Option<u64>,
 
-        /// Force a specific encoder (e.g., h264_nvenc, hevc_nvenc, libx264). Auto-detects by default.
+        /// Force a specific encoder (e.g., h264_nvenc, hevc_nvenc, libx264, or gst-v4l2h264
+        /// with the `gstreamer` feature). Auto-detects by default.
         #[arg(long)]
         encoder: Option<String>,
 
@@ -352,7 +353,7 @@ enum Commands {
         #[arg(long, default_value_t = 1080)]
         height: u32,
 
-        /// Force a specific encoder (e.g. "libx264", "h264_nvenc").
+        /// Force a specific encoder (e.g. "libx264", "h264_nvenc", "gst-v4l2h264").
         #[arg(long)]
         encoder: Option<String>,
 
@@ -504,7 +505,8 @@ enum Commands {
         #[arg(long, default_value_t = 1080)]
         height: u32,
 
-        /// Force a specific encoder (e.g. "libx264", "h264_v4l2m2m").
+        /// Force a specific encoder (e.g. "libx264", "h264_v4l2m2m", "gst-v4l2h264"
+        /// with the `gstreamer` feature).
         #[arg(long)]
         encoder: Option<String>,
 
@@ -1077,6 +1079,19 @@ fn main() -> anyhow::Result<()> {
                 for enc in &encoders {
                     let tag = if enc.is_hardware { "HW" } else { "SW" };
                     println!("  {} [{}] — {}", enc.name, tag, enc.description);
+                }
+            }
+            #[cfg(feature = "gstreamer")]
+            {
+                use reco_io::gstreamer::encoder::GstVideoEncoder;
+                println!("\nGStreamer encoders (--encoder):");
+                for enc in GstVideoEncoder::ALL {
+                    let status = if enc.is_available() {
+                        "available"
+                    } else {
+                        "not available"
+                    };
+                    println!("  {} [HW] — {} ({status})", enc.name(), enc.element_name());
                 }
             }
             Ok(())

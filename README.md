@@ -123,7 +123,7 @@ cargo build --release
 | `tensorrt-native` | reco-detect | Native TensorRT for `.engine` files (Jetson, no ORT glibc dep) |
 | `ncnn` | reco-detect | NCNN backend for mobile / embedded |
 | `load-dynamic` | reco-detect | Dynamically load `libonnxruntime.so` at runtime |
-| `gstreamer` | reco-io | GStreamer camera ingest (Linux / Jetson CSI) |
+| `gstreamer` | reco-io | GStreamer camera ingest (Linux / Jetson CSI) and V4L2 hardware encode (`--encoder gst-v4l2h264`) |
 | `stacked-output` | reco-io | FFmpeg-backed stacked-video encoder / source |
 | `profiling` | workspace | `tracing` + `tracing-chrome` instrumentation, zero-cost when off |
 | `keyboard` (default) | reco-control | Keyboard transport for operator intents |

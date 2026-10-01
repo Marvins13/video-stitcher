@@ -7,7 +7,8 @@
 //!
 //! Enable backends via feature flags:
 //! - `ffmpeg` (default): file decode/encode, RTMP/SRT/RTSP
-//! - `gstreamer`: live camera capture (Jetson ISP, V4L2, etc.)
+//! - `gstreamer`: live camera capture (Jetson ISP, V4L2, etc.) and
+//!   V4L2 hardware encode via `v4l2h264enc` (`--encoder gst-v4l2h264`)
 //! - `libcamera`: RPi CSI camera capture via rpicam-vid
 //! - `config`: opt-in user-preference persistence (via the `settings`
 //!   module) for consumers like reco-gui that need to remember
