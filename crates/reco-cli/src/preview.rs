@@ -290,7 +290,7 @@ impl App {
             }
         };
         println!("[REC] Recording to {path} ({enc_name})");
-        self.recording = Some(Box::new(encoder));
+        self.recording = Some(encoder);
         self.recording_path = Some(path);
         self.recording_frames = 0;
     }

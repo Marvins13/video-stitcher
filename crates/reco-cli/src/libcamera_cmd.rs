@@ -137,16 +137,16 @@ pub fn run_libcamera(
         ..Default::default()
     };
 
-    let encoder = reco_io::adapters::FfmpegFileEncoder::new(
+    let (encoder, enc_name) = reco_io::adapters::create_file_encoder(
         Path::new(output),
         width,
         height,
         (capture_fps as i32, 1),
         &enc_config,
     )?;
-    println!("Encoder: {}", encoder.encoder_name());
+    println!("Encoder: {enc_name}");
 
-    session.set_encoder(Box::new(encoder), 2);
+    session.set_encoder(encoder, 2);
 
     let frame_limit =
         reco_core::session::types::compute_frame_limit(end_time, max_frames, capture_fps as f64);

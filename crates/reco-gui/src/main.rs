@@ -725,7 +725,7 @@ impl AppState {
         // The UI thread sends NV12 data without blocking on FFmpeg.
         let (tx, rx) = std::sync::mpsc::sync_channel::<RecordingFrame>(4);
         let handle = std::thread::spawn(move || {
-            let mut encoder: Box<dyn reco_core::encoder::Encoder + Send> = Box::new(encoder);
+            let mut encoder = encoder;
             while let Ok(frame) = rx.recv() {
                 let _ = encoder.submit(reco_core::encoder::OutputFrame {
                     data: &frame.data,

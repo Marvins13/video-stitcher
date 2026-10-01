@@ -514,11 +514,35 @@ pub fn detect_zero_copy(source: &FfmpegFileSource, gpu: &reco_core::gpu::GpuCont
 
 // -- Encoder creation helper --
 
-/// Create an FFmpeg file encoder from high-level parameters.
+/// Boxed file encoder plus the name of the selected encoder backend.
+#[cfg(feature = "ffmpeg")]
+pub type FileEncoder = (Box<dyn Encoder + Send>, String);
+
+/// Create the file encoder selected by `config.encoder_name`.
+///
+/// Builds an [`FfmpegFileEncoder`] (auto-detection when `None`). Returns
+/// the encoder and the name of the selected backend (e.g. `"h264_nvenc"`,
+/// `"libx264"`). Consumers go through this instead of a concrete encoder
+/// type so further backends can be added behind the same entry point.
+#[cfg(feature = "ffmpeg")]
+pub fn create_file_encoder(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    fps: (i32, i32),
+    config: &ffmpeg::encoder::EncoderConfig,
+) -> Result<FileEncoder, EncodeError> {
+    let encoder = FfmpegFileEncoder::new(path, width, height, fps, config)?;
+    let name = encoder.encoder_name().to_string();
+    Ok((Box::new(encoder), name))
+}
+
+/// Create a file encoder from high-level parameters.
 ///
 /// Wraps codec parsing, quality mapping, and encoder creation into a single
 /// call. Returns the encoder and the name of the selected encoder backend
-/// (e.g. `"h264_nvenc"`, `"libx264"`).
+/// (e.g. `"h264_nvenc"`, `"libx264"`); see
+/// [`create_file_encoder`] for how the backend is chosen.
 ///
 /// This is the preferred way for consumers (CLI, GUI, cloud) to create an
 /// encoder without duplicating codec/quality parsing logic.
@@ -545,7 +569,7 @@ pub fn create_encoder(
     encoder_name: Option<String>,
     quality_value: Option<u8>,
     preset: Option<String>,
-) -> Result<(FfmpegFileEncoder, String), reco_core::encoder::EncodeError> {
+) -> Result<FileEncoder, reco_core::encoder::EncodeError> {
     use crate::output;
 
     let out_codec: output::Codec = codec.parse().unwrap_or_else(|_| {
@@ -568,9 +592,7 @@ pub fn create_encoder(
         gop_size: None,
         stream_url: None,
     };
-    let encoder = FfmpegFileEncoder::new(path, width, height, fps, &enc_config)?;
-    let name = encoder.encoder_name().to_string();
-    Ok((encoder, name))
+    create_file_encoder(path, width, height, fps, &enc_config)
 }
 
 // -- FFmpeg File Encoder --

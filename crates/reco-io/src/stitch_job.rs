@@ -722,16 +722,15 @@ impl StitchJob {
             gop_size: None,
             stream_url: None,
         };
-        let encoder = crate::adapters::FfmpegFileEncoder::new(
+        let (encoder, enc_name) = crate::adapters::create_file_encoder(
             &self.output,
             out_w,
             out_h,
             (fps_rational.0, fps_rational.1),
             &enc_config,
         )?;
-        let enc_name = encoder.encoder_name().to_string();
         session.telemetry_mut().set_encoder_name(enc_name.clone());
-        session.set_encoder(Box::new(encoder), 2);
+        session.set_encoder(encoder, 2);
 
         #[cfg(feature = "stacked-output")]
         if let Some(ref mut cfg) = self.replay_recording {
