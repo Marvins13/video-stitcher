@@ -514,11 +514,161 @@ pub fn detect_zero_copy(source: &FfmpegFileSource, gpu: &reco_core::gpu::GpuCont
 
 // -- Encoder creation helper --
 
-/// Create an FFmpeg file encoder from high-level parameters.
+/// Encoder names starting with this prefix select a GStreamer pipeline
+/// encoder (e.g. `"gst-v4l2h264"`) instead of an FFmpeg one.
+pub const GST_ENCODER_PREFIX: &str = "gst-";
+
+/// Boxed file encoder plus the name of the selected encoder backend.
+#[cfg(feature = "ffmpeg")]
+pub type FileEncoder = (Box<dyn Encoder + Send>, String);
+
+/// Create the file encoder selected by `config.encoder_name`.
+///
+/// Names starting with [`GST_ENCODER_PREFIX`] build a GStreamer encoder
+/// (requires the `gstreamer` feature). Everything else, including
+/// auto-detection (`None`), builds an [`FfmpegFileEncoder`]. Returns the
+/// encoder and the name of the selected backend (e.g. `"h264_nvenc"`,
+/// `"libx264"`, `"gst-v4l2h264"`).
+#[cfg(feature = "ffmpeg")]
+pub fn create_file_encoder(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    fps: (i32, i32),
+    config: &ffmpeg::encoder::EncoderConfig,
+) -> Result<FileEncoder, EncodeError> {
+    if let Some(name) = config.encoder_name.as_deref()
+        && name.starts_with(GST_ENCODER_PREFIX)
+    {
+        return create_gst_file_encoder(path, width, height, fps, name, config);
+    }
+    let encoder = FfmpegFileEncoder::new(path, width, height, fps, config)?;
+    let name = encoder.encoder_name().to_string();
+    Ok((Box::new(encoder), name))
+}
+
+#[cfg(all(feature = "ffmpeg", not(feature = "gstreamer")))]
+fn create_gst_file_encoder(
+    _path: &std::path::Path,
+    _width: u32,
+    _height: u32,
+    _fps: (i32, i32),
+    name: &str,
+    _config: &ffmpeg::encoder::EncoderConfig,
+) -> Result<FileEncoder, EncodeError> {
+    Err(EncodeError::Init {
+        reason: format!(
+            "encoder '{name}' needs the `gstreamer` feature \
+             (e.g. cargo build --release -p reco-cli --features gstreamer)"
+        ),
+    })
+}
+
+#[cfg(all(feature = "ffmpeg", feature = "gstreamer"))]
+fn create_gst_file_encoder(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    fps: (i32, i32),
+    name: &str,
+    config: &ffmpeg::encoder::EncoderConfig,
+) -> Result<FileEncoder, EncodeError> {
+    use crate::gstreamer::encoder::{
+        DEFAULT_STALL_TIMEOUT, GstEncoderConfig, GstFileEncoder, GstVideoEncoder,
+    };
+
+    let encoder = GstVideoEncoder::from_name(name).ok_or_else(|| EncodeError::Init {
+        reason: format!(
+            "unknown GStreamer encoder '{name}' (available: {})",
+            GstVideoEncoder::ALL
+                .iter()
+                .map(|e| e.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })?;
+    if config.stream_url.is_some() {
+        return Err(EncodeError::Init {
+            reason: format!(
+                "{name} does not support streaming output (--stream / stream_url) yet; \
+                 use an FFmpeg encoder for record + stream"
+            ),
+        });
+    }
+    if config.audio_source.as_ref().is_some_and(|p| !p.is_empty()) {
+        log::warn!("{name}: audio passthrough is not supported; the output has no audio track");
+    }
+    if config.codec != ffmpeg::encoder::VideoCodec::H264 {
+        log::warn!("{name} encodes H.264; ignoring codec {:?}", config.codec);
+    }
+    if let Some(preset) = &config.preset {
+        log::warn!("{name} has no encoder presets; ignoring preset '{preset}'");
+    }
+
+    let (bitrate_bps, peak_bitrate_bps) =
+        gst_h264_bitrate_bps(config.quality_preset, config.quality, width, height);
+    let gst_config = GstEncoderConfig {
+        encoder,
+        container: match config.container {
+            // Like FFmpeg's `format::output(path)`: plain MP4 infers the
+            // muxer from the extension (`.mov`, `.mkv`).
+            ffmpeg::encoder::Container::Mp4 => {
+                match crate::output::Format::for_output(&path.to_string_lossy()) {
+                    f @ (crate::output::Format::Mov | crate::output::Format::Mkv) => f,
+                    _ => crate::output::Format::Mp4,
+                }
+            }
+            ffmpeg::encoder::Container::Mp4Fragmented => crate::output::Format::Mp4Fragmented,
+            ffmpeg::encoder::Container::Matroska => crate::output::Format::Mkv,
+            ffmpeg::encoder::Container::Flv => crate::output::Format::Flv,
+        },
+        bitrate_bps,
+        peak_bitrate_bps,
+        gop_size: config.gop_size,
+        stall_timeout: DEFAULT_STALL_TIMEOUT,
+    };
+    let encoder = GstFileEncoder::new(path, width, height, fps, &gst_config)?;
+    Ok((Box::new(encoder), name.to_string()))
+}
+
+/// VBR target / peak bitrate in bps for the GStreamer H.264 encoders.
+///
+/// msm_vidc has no constant-quality mode, so the tier sets the bitrate.
+/// Targets are 3 / 5 / 8 Mbps at 1920x1080 (= 6 / 10 / 16 Mbps at the
+/// 3840x1080 panorama), scaled by pixel count via `scale_bitrate_mbps`;
+/// the peak is 1.5x the target. Measured on msm_vidc, quality saturates
+/// around 8 Mbps at 3840x1080 on static footage; Balanced keeps headroom
+/// for camera pans. A `quality` override (0-100) selects the tier the
+/// same way the FFmpeg path does.
+#[cfg(all(feature = "ffmpeg", feature = "gstreamer"))]
+fn gst_h264_bitrate_bps(
+    preset: ffmpeg::encoder::Quality,
+    quality: Option<u8>,
+    width: u32,
+    height: u32,
+) -> (u32, u32) {
+    use ffmpeg::encoder::Quality;
+    let tier = match quality {
+        Some(q) if q >= 75 => Quality::High,
+        Some(q) if q >= 40 => Quality::Balanced,
+        Some(_) => Quality::Fast,
+        None => preset,
+    };
+    let target_mbps_1080p = match tier {
+        Quality::Fast => 3,
+        Quality::Balanced => 5,
+        Quality::High => 8,
+    };
+    let target = ffmpeg::encoder::scale_bitrate_mbps(target_mbps_1080p, width, height) * 1_000_000;
+    (target, target / 2 * 3)
+}
+
+/// Create a file encoder from high-level parameters.
 ///
 /// Wraps codec parsing, quality mapping, and encoder creation into a single
 /// call. Returns the encoder and the name of the selected encoder backend
-/// (e.g. `"h264_nvenc"`, `"libx264"`).
+/// (e.g. `"h264_nvenc"`, `"libx264"`, `"gst-v4l2h264"`); see
+/// [`create_file_encoder`] for how the backend is chosen.
 ///
 /// This is the preferred way for consumers (CLI, GUI, cloud) to create an
 /// encoder without duplicating codec/quality parsing logic.
@@ -545,7 +695,7 @@ pub fn create_encoder(
     encoder_name: Option<String>,
     quality_value: Option<u8>,
     preset: Option<String>,
-) -> Result<(FfmpegFileEncoder, String), reco_core::encoder::EncodeError> {
+) -> Result<FileEncoder, reco_core::encoder::EncodeError> {
     use crate::output;
 
     let out_codec: output::Codec = codec.parse().unwrap_or_else(|_| {
@@ -568,9 +718,7 @@ pub fn create_encoder(
         gop_size: None,
         stream_url: None,
     };
-    let encoder = FfmpegFileEncoder::new(path, width, height, fps, &enc_config)?;
-    let name = encoder.encoder_name().to_string();
-    Ok((encoder, name))
+    create_file_encoder(path, width, height, fps, &enc_config)
 }
 
 // -- FFmpeg File Encoder --
@@ -635,5 +783,26 @@ impl Encoder for FfmpegFileEncoder {
         self.inner.finish().map_err(|e| EncodeError::Finalize {
             reason: e.to_string(),
         })
+    }
+}
+
+#[cfg(all(test, feature = "ffmpeg", feature = "gstreamer"))]
+mod tests {
+    use super::*;
+    use crate::ffmpeg::encoder::Quality;
+
+    #[test]
+    fn gst_bitrate_tiers_at_panorama_and_1080p() {
+        let mbps = |p, q, w, h| {
+            let (t, peak) = gst_h264_bitrate_bps(p, q, w, h);
+            (t / 1_000_000, peak as f64 / 1e6)
+        };
+        assert_eq!(mbps(Quality::Fast, None, 3840, 1080), (6, 9.0));
+        assert_eq!(mbps(Quality::Balanced, None, 3840, 1080), (10, 15.0));
+        assert_eq!(mbps(Quality::High, None, 3840, 1080), (16, 24.0));
+        assert_eq!(mbps(Quality::Balanced, None, 1920, 1080), (5, 7.5));
+        // Quality override picks the tier regardless of the preset.
+        assert_eq!(mbps(Quality::Fast, Some(80), 3840, 1080), (16, 24.0));
+        assert_eq!(mbps(Quality::High, Some(10), 3840, 1080), (6, 9.0));
     }
 }
