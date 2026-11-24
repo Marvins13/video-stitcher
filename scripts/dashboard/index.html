@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="format-detection" content="telephone=no, date=no, address=no, email=no">
+<title>Reco Kamera</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f3f5;
+    --card: #ffffff;
+    --text: #15171a;
+    --muted: #5d6573;
+    --line: #d6dbe2;
+    --track: #e4e7ec;
+    --red: #dc2626;
+    --red-soft: #fde4e4;
+    --red-text: #9b1c1c;
+    --amber: #b45309;
+    --amber-soft: #fdefcf;
+    --amber-text: #7a4a04;
+    --grey-soft: #e3e6eb;
+    --grey-text: #3c4350;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d0f12;
+      --card: #171b21;
+      --text: #f1f3f5;
+      --muted: #9ba4b0;
+      --line: #2d343e;
+      --track: #232932;
+      --red: #f26565;
+      --red-soft: #3c1717;
+      --red-text: #ffb4b4;
+      --amber: #fbbf24;
+      --amber-soft: #3a2b0d;
+      --amber-text: #fcd58a;
+      --grey-soft: #262c35;
+      --grey-text: #d4d9e0;
+      --shadow: none;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+             calc(28px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+  }
+
+  /* status */
+  .card { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); padding: 14px; }
+  .badge {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 14px; border-radius: 14px;
+    background: var(--grey-soft); color: var(--grey-text);
+    font-size: 26px; font-weight: 750;
+  }
+  .badge.amber { background: var(--amber-soft); color: var(--amber); }
+  .badge.red { background: var(--red-soft); color: var(--red); }
+  .badge .time { margin-left: auto; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .dot {
+    width: 14px; height: 14px; flex: none; border-radius: 50%; background: var(--red);
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.25; transform: scale(0.7); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot { animation: none; } }
+  .sub { margin: 8px 2px 0; color: var(--muted); font-size: 15px; overflow-wrap: anywhere; }
+  .errbox {
+    margin-top: 10px; padding: 10px 12px; border-radius: 12px;
+    background: var(--red-soft); color: var(--red-text);
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .banners { display: grid; gap: 8px; margin-top: 10px; }
+  .banners:empty { display: none; }
+  .banner { padding: 10px 12px; border-radius: 12px; font-size: 15px; font-weight: 550; overflow-wrap: anywhere; }
+  .banner.warn { background: var(--amber-soft); color: var(--amber-text); }
+  .banner.bad { background: var(--red-soft); color: var(--red-text); }
+
+  /* live preview, 32:9 */
+  .preview {
+    position: relative; width: 100%; height: 0; padding-top: 28.125%;
+    margin-top: 12px; border-radius: 14px; overflow: hidden; background: #0a0c0f;
+  }
+  .preview img {
+    position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+    width: 100%; height: 100%; object-fit: contain; display: block;
+  }
+  .preview .ph {
+    position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px; text-align: center; color: #9ba4b0; font-size: 16px;
+  }
+  .preview.zoom {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 50;
+    height: auto; padding-top: 0; margin: 0; border-radius: 0;
+  }
+  .preview.zoom img {
+    top: 50%; left: 50%; right: auto; bottom: auto;
+    width: 100vw; height: 100vh; transform: translate(-50%, -50%);
+  }
+  @media (orientation: portrait) {
+    .preview.zoom img { width: 100vh; height: 100vw; transform: translate(-50%, -50%) rotate(90deg); }
+  }
+
+  /* controls */
+  .controls { margin-top: 14px; display: grid; gap: 10px; }
+  #idleControls { display: grid; gap: 10px; }
+  .label { margin: 4px 4px 0; font-size: 14px; font-weight: 600; color: var(--muted); }
+  .seg {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+    padding: 4px; border-radius: 14px; background: var(--track);
+  }
+  .seg button {
+    min-height: 46px; border: 0; border-radius: 10px; background: transparent; color: var(--text);
+    font: inherit; font-size: 16px; font-weight: 600; cursor: pointer; touch-action: manipulation;
+  }
+  .seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+  .seg button:disabled { opacity: 0.5; }
+  select {
+    width: 100%; min-height: 48px; padding: 0 12px; border-radius: 14px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+    font: inherit; font-size: 17px;
+  }
+  select:disabled { opacity: 0.5; }
+  .btn {
+    display: block; width: 100%; min-height: 64px; border: 0; border-radius: 18px;
+    font: inherit; font-size: 21px; font-weight: 750; color: #ffffff; cursor: pointer;
+    touch-action: manipulation;
+  }
+  .btn.start { background: #15803d; }
+  .btn.stop { background: #dc2626; }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+  .msg {
+    padding: 10px 12px; border-radius: 12px;
+    background: var(--red-soft); color: var(--red-text); font-size: 15px;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+
+  /* stat tiles */
+  .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile {
+    min-width: 0; padding: 12px 14px; border-radius: 14px;
+    background: var(--card); box-shadow: var(--shadow);
+  }
+  .tile.wide { grid-column: 1 / -1; }
+  .tile .k { font-size: 13px; font-weight: 600; color: var(--muted); }
+  .tile .v {
+    margin-top: 2px; font-size: 26px; font-weight: 700;
+    font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+  }
+  .tile .s { margin-top: 2px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .tile.warn .v { color: var(--amber); }
+  .temps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 4px; }
+  .temp { min-width: 0; }
+  .temp .tv { margin-top: 2px; font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .temp.warn .tv { color: var(--amber); }
+  .temp.crit .tv { color: var(--red); }
+
+  /* recordings, log, footer */
+  h2 { margin: 24px 4px 6px; font-size: 17px; font-weight: 650; }
+  .recs { list-style: none; margin: 0; padding: 0; }
+  .rec {
+    display: flex; align-items: center; gap: 4px;
+    margin-top: 8px; padding: 4px 4px 4px 14px; border-radius: 14px;
+    background: var(--card); box-shadow: var(--shadow);
+  }
+  .rec.empty { display: block; padding: 14px; color: var(--muted); }
+  .rec-info { flex: 1; min-width: 0; padding: 4px 0; }
+  .rec-name {
+    display: block; padding: 10px 0; font-size: 16px; font-weight: 600;
+    color: var(--text); text-decoration: none; overflow-wrap: anywhere;
+  }
+  .rec-meta { margin-top: -4px; font-size: 13px; color: var(--muted); }
+  .rec-dl {
+    flex: none; display: flex; align-items: center; justify-content: center;
+    width: 48px; height: 48px; border-radius: 12px;
+    color: var(--text); text-decoration: none; font-size: 22px;
+  }
+  details { margin-top: 22px; }
+  summary {
+    display: flex; align-items: center; min-height: 44px; padding: 0 4px;
+    font-size: 17px; font-weight: 650; cursor: pointer;
+  }
+  pre#log {
+    margin: 8px 0 0; padding: 10px 12px; max-height: 46vh; overflow: auto;
+    border-radius: 14px; background: var(--card); box-shadow: var(--shadow);
+    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  footer {
+    margin-top: 24px; font-size: 13px; color: var(--muted);
+    text-align: center; overflow-wrap: anywhere;
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+  <section class="card" aria-live="polite">
+    <div id="badge" class="badge">
+      <span id="dot" class="dot" hidden></span>
+      <span id="badgeText">Bereit</span>
+      <span id="badgeTime" class="time"></span>
+    </div>
+    <p id="sub" class="sub"></p>
+    <div id="errBox" class="errbox" hidden></div>
+  </section>
+
+  <div id="banners" class="banners" role="status"></div>
+
+  <div id="preview" class="preview">
+    <img id="previewImg" alt="Live-Vorschau der Panorama-Kamera" hidden>
+    <div id="previewPh" class="ph">Keine Vorschau – Aufnahme starten</div>
+  </div>
+
+  <section class="controls">
+    <div id="idleControls">
+      <div class="label" id="qualityLabel">Qualität</div>
+      <div class="seg" role="group" aria-labelledby="qualityLabel">
+        <button type="button" data-q="fast" aria-pressed="false">Schnell</button>
+        <button type="button" data-q="balanced" aria-pressed="true">Ausgewogen</button>
+        <button type="button" data-q="high" aria-pressed="false">Hoch</button>
+      </div>
+      <label class="label" for="duration">Dauer</label>
+      <select id="duration">
+        <option value="">Unbegrenzt</option>
+        <option value="45">45 min</option>
+        <option value="50">50 min</option>
+        <option value="90">90 min</option>
+        <option value="100">100 min</option>
+      </select>
+      <button type="button" id="startBtn" class="btn start">Aufnahme starten</button>
+    </div>
+    <button type="button" id="stopBtn" class="btn stop" hidden>Aufnahme stoppen</button>
+    <div id="msg" class="msg" role="alert" hidden></div>
+  </section>
+
+  <section class="tiles">
+    <div class="tile" id="tFpsBox">
+      <div class="k">fps aktuell</div>
+      <div class="v" id="tFps">–</div>
+      <div class="s" id="tFpsSub"></div>
+    </div>
+    <div class="tile">
+      <div class="k">Ø fps</div>
+      <div class="v" id="tAvg">–</div>
+    </div>
+    <div class="tile">
+      <div class="k">Frames</div>
+      <div class="v" id="tFrames">–</div>
+      <div class="s" id="tFramesSub"></div>
+    </div>
+    <div class="tile">
+      <div class="k">Dateigröße</div>
+      <div class="v" id="tSize">–</div>
+      <div class="s" id="tSizeSub"></div>
+    </div>
+    <div class="tile" id="tDiskBox">
+      <div class="k">Speicher frei</div>
+      <div class="v" id="tDisk">–</div>
+      <div class="s" id="tDiskSub"></div>
+    </div>
+    <div class="tile">
+      <div class="k">RAM frei</div>
+      <div class="v" id="tRam">–</div>
+      <div class="s" id="tRamSub"></div>
+    </div>
+    <div class="tile wide">
+      <div class="k">Temperatur</div>
+      <div class="temps">
+        <div class="temp" id="tCpuBox"><div class="k">CPU</div><div class="tv" id="tCpu">–</div></div>
+        <div class="temp" id="tGpuBox"><div class="k">GPU</div><div class="tv" id="tGpu">–</div></div>
+        <div class="temp" id="tCamBox"><div class="k">Kamera</div><div class="tv" id="tCam">–</div></div>
+      </div>
+    </div>
+    <div class="tile wide">
+      <div class="k">Systemlast (1-Min.-Mittel)</div>
+      <div class="v" id="tLoad">–</div>
+    </div>
+  </section>
+
+  <h2>Aufnahmen</h2>
+  <ul id="recs" class="recs"></ul>
+
+  <details id="logbox">
+    <summary>Log</summary>
+    <pre id="log">(noch keine Ausgabe)</pre>
+  </details>
+
+  <footer id="footer">Verbinde mit dem Board …</footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var POLL_MS = 1000;
+  var FPS_LOW = 28;
+  var FPS_LOW_POLLS = 3;
+  var TEMP_WARN = 75;
+  var TEMP_CRIT = 85;
+  var DISK_WARN_GB = 5;
+  var MIB = 1024 * 1024;
+  var GIB = 1024 * MIB;
+  var FALLBACK_RATE = 10 * 1000 * 1000 / 8; // 10 Mbit/s in bytes per second
+
+  function $(id) { return document.getElementById(id); }
+
+  var el = {
+    badge: $("badge"), dot: $("dot"), badgeText: $("badgeText"), badgeTime: $("badgeTime"),
+    sub: $("sub"), errBox: $("errBox"), banners: $("banners"),
+    preview: $("preview"), previewImg: $("previewImg"), previewPh: $("previewPh"),
+    idle: $("idleControls"), duration: $("duration"), startBtn: $("startBtn"),
+    stopBtn: $("stopBtn"), msg: $("msg"),
+    fpsBox: $("tFpsBox"), fps: $("tFps"), fpsSub: $("tFpsSub"),
+    avg: $("tAvg"), frames: $("tFrames"), framesSub: $("tFramesSub"),
+    size: $("tSize"), sizeSub: $("tSizeSub"),
+    diskBox: $("tDiskBox"), disk: $("tDisk"), diskSub: $("tDiskSub"),
+    ram: $("tRam"), ramSub: $("tRamSub"),
+    cpuBox: $("tCpuBox"), cpu: $("tCpu"), gpuBox: $("tGpuBox"), gpu: $("tGpu"),
+    camBox: $("tCamBox"), cam: $("tCam"), load: $("tLoad"),
+    recs: $("recs"), logbox: $("logbox"), log: $("log"), footer: $("footer")
+  };
+  var qualityButtons = Array.prototype.slice.call(document.querySelectorAll(".seg button"));
+
+  var quality = "balanced";
+  var busy = false;
+  var lastData = null;
+  var lowFpsPolls = 0;
+  var sizeSamples = [];
+  var clock = { serverNow: 0, localAt: 0, started: null };
+  var previewActive = false;
+  var previewLoading = false;
+  var previewShown = false;
+  var msgTimer = null;
+  var lastLog = null;
+  var recNames = null;
+  var recMeta = {};
+
+  /* ---- formatting (every server-provided string ends up in textContent) ---- */
+
+  function num(v, digits) {
+    if (typeof v !== "number" || !isFinite(v)) return "–";
+    return v.toLocaleString("de-DE", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+
+  function fmtBytes(b) {
+    if (typeof b !== "number") return "–";
+    if (b >= GIB) return num(b / GIB, 2) + " GB";
+    return num(b / MIB, 0) + " MB";
+  }
+
+  function fmtClock(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    var h = Math.floor(sec / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    var s = sec % 60;
+    function p(x) { return (x < 10 ? "0" : "") + x; }
+    return h > 0 ? h + ":" + p(m) + ":" + p(s) : p(m) + ":" + p(s);
+  }
+
+  function fmtDuration(sec) {
+    var mins = Math.floor(sec / 60);
+    var h = Math.floor(mins / 60);
+    var m = mins % 60;
+    return (h > 0 ? h + " h " : "") + m + " min";
+  }
+
+  function fmtRemaining(freeBytes, rate) {
+    if (typeof freeBytes !== "number" || !(rate > 0)) return "–";
+    return "≈ " + fmtDuration(freeBytes / rate) + " Platz";
+  }
+
+  function fmtDate(unix) {
+    if (typeof unix !== "number") return "";
+    return new Date(unix * 1000).toLocaleString("de-DE", {
+      day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit"
+    });
+  }
+
+  function memText(mb) {
+    if (typeof mb !== "number") return "–";
+    return mb >= 1024 ? num(mb / 1024, 1) + " GB" : num(mb, 0) + " MB";
+  }
+
+  function base(path) {
+    return typeof path === "string" ? path.split("/").pop() : "";
+  }
+
+  function setFlag(node, cls, on) {
+    if (on) node.classList.add(cls); else node.classList.remove(cls);
+  }
+
+  function setTemp(valueNode, boxNode, value) {
+    var ok = typeof value === "number";
+    valueNode.textContent = ok ? num(value, 1) + " °C" : "–";
+    setFlag(boxNode, "warn", ok && value >= TEMP_WARN && value < TEMP_CRIT);
+    setFlag(boxNode, "crit", ok && value >= TEMP_CRIT);
+  }
+
+  /* ---- network ---- */
+
+  async function api(path, method, body, timeoutMs) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+    try {
+      var opts = { method: method, cache: "no-store", signal: ctrl.signal };
+      if (body !== undefined) {
+        opts.headers = { "Content-Type": "application/json" };
+        opts.body = JSON.stringify(body);
+      }
+      var res = await fetch(path, opts);
+      var text = await res.text();
+      var data = null;
+      try { data = JSON.parse(text); } catch (e) { data = null; }
+      if (!res.ok) {
+        throw new Error((data && data.error) || ("Fehler " + res.status + " vom Board."));
+      }
+      if (!data) throw new Error("Ungültige Antwort vom Board.");
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function errorText(e) {
+    if (e && e.name === "AbortError") return "Keine Antwort vom Board (Zeitüberschreitung).";
+    if (e instanceof TypeError) return "Keine Verbindung zum Board.";
+    return (e && e.message) || "Unbekannter Fehler.";
+  }
+
+  async function poll() {
+    var data = null;
+    try {
+      data = await api("/api/status", "GET", undefined, 4000);
+    } catch (e) {
+      data = null;
+    }
+    if (data) {
+      try {
+        render(data);
+      } catch (e) {
+        console.error(e);
+      }
+    } else {
+      renderBannerList([["bad", "Keine Verbindung zum Board – neuer Versuch läuft …"]]);
+    }
+    setTimeout(poll, POLL_MS);
+  }
+
+  /* ---- rendering ---- */
+
+  function render(d) {
+    lastData = d;
+    var st = d.state;
+    var reco = d.reco || null;
+    var sys = d.system || {};
+    var temps = sys.temps || {};
+    var run = d.run || null;
+    var rec = st === "recording";
+    var fpsNow = reco && typeof reco.fps_recent === "number" ? reco.fps_recent : null;
+
+    if (typeof d.now_unix === "number") {
+      clock.serverNow = d.now_unix;
+      clock.localAt = Date.now();
+    }
+    clock.started = run && typeof run.started_unix === "number" ? run.started_unix : null;
+
+    if (!rec) {
+      lowFpsPolls = 0;
+    } else if (fpsNow !== null) {
+      lowFpsPolls = fpsNow < FPS_LOW ? lowFpsPolls + 1 : 0;
+    }
+    var fpsLow = rec && lowFpsPolls >= FPS_LOW_POLLS;
+
+    if (rec && typeof d.file_size_bytes === "number") {
+      sizeSamples.push({ t: Date.now(), s: d.file_size_bytes });
+      if (sizeSamples.length > 12) sizeSamples.shift();
+    } else {
+      sizeSamples = [];
+    }
+
+    renderBadge(d, run);
+    renderPreview(st);
+    renderControls();
+    renderTiles(d, reco, run, sys, temps, rec, fpsNow, fpsLow);
+    renderBanners(d, sys, temps, fpsNow, fpsLow);
+    renderRecordings(d.recordings || []);
+    renderLog(d.log || []);
+    renderFooter(sys);
+    updateClock();
+  }
+
+  function renderBadge(d, run) {
+    var st = d.state;
+    var cls = "badge", text = "Bereit", sub = "", dot = false;
+    if (st === "starting") {
+      cls = "badge amber";
+      text = "Startet …";
+      sub = "Kameras werden initialisiert.";
+    } else if (st === "recording") {
+      cls = "badge red";
+      text = "AUFNAHME";
+      dot = true;
+      sub = run ? "Datei: " + base(run.output) + " · " + (run.minutes ? "Ziel " + run.minutes + " min" : "unbegrenzt") : "";
+    } else if (st === "stopping") {
+      cls = "badge amber";
+      text = "Wird beendet …";
+      sub = "Die Datei wird abgeschlossen.";
+    } else if (st === "error") {
+      cls = "badge red";
+      text = "Fehler";
+      sub = (run ? "Datei: " + base(run.output) + " · " : "") + "Details siehe Log.";
+    } else if (run) {
+      sub = "Letzte Datei: " + base(run.output);
+    } else {
+      sub = "Noch keine Aufnahme seit dem Start des Dashboards.";
+    }
+    el.badge.className = cls;
+    el.dot.hidden = !dot;
+    el.badgeText.textContent = text;
+    el.sub.textContent = sub;
+    el.sub.hidden = !sub;
+    var err = st === "error" && d.error ? String(d.error) : "";
+    el.errBox.textContent = err;
+    el.errBox.hidden = !err;
+  }
+
+  function renderPreview(st) {
+    if (st === "stopping") {
+      previewActive = false; // keep the last frame, stop refreshing
+      return;
+    }
+    if (st === "starting" || st === "recording") {
+      previewActive = true;
+      if (!previewShown) {
+        el.previewImg.hidden = true;
+        el.previewPh.hidden = false;
+        el.previewPh.textContent = "Vorschau wird geladen …";
+      }
+      return;
+    }
+    previewActive = false;
+    previewShown = false;
+    el.previewImg.hidden = true;
+    el.preview.classList.remove("zoom");
+    el.previewPh.hidden = false;
+    el.previewPh.textContent = "Keine Vorschau – Aufnahme starten";
+  }
+
+  function renderControls() {
+    var st = lastData ? lastData.state : "idle";
+    var idle = st === "idle" || st === "error";
+    el.idle.hidden = !idle;
+    el.stopBtn.hidden = idle;
+    el.stopBtn.textContent = st === "stopping" ? "Wird beendet …" : "Aufnahme stoppen";
+    applyBusy();
+  }
+
+  function applyBusy() {
+    var st = lastData ? lastData.state : "idle";
+    var canStart = st === "idle" || st === "error";
+    el.startBtn.disabled = busy || !canStart;
+    el.stopBtn.disabled = busy || st === "stopping";
+    el.duration.disabled = busy;
+    qualityButtons.forEach(function (b) { b.disabled = busy; });
+  }
+
+  function setBusy(v) {
+    busy = v;
+    applyBusy();
+  }
+
+  function showMsg(text) {
+    clearTimeout(msgTimer);
+    el.msg.textContent = text || "";
+    el.msg.hidden = !text;
+    if (text) {
+      msgTimer = setTimeout(function () { el.msg.hidden = true; }, 9000);
+    }
+  }
+
+  function growthRate() {
+    if (sizeSamples.length < 2) return null;
+    var a = sizeSamples[0];
+    var b = sizeSamples[sizeSamples.length - 1];
+    var dt = (b.t - a.t) / 1000;
+    if (dt < 3) return null;
+    var rate = (b.s - a.s) / dt;
+    return rate > 0 ? rate : null;
+  }
+
+  function renderTiles(d, reco, run, sys, temps, rec, fpsNow, fpsLow) {
+    el.fps.textContent = rec && fpsNow !== null ? num(fpsNow, 1) : "–";
+    el.fpsSub.textContent = rec ? "Soll 30 fps" : "";
+    setFlag(el.fpsBox, "warn", fpsLow);
+
+    el.avg.textContent = reco && typeof reco.fps_avg === "number" ? num(reco.fps_avg, 1) : "–";
+    el.frames.textContent = reco && typeof reco.frames === "number" ? num(reco.frames, 0) : "–";
+    el.framesSub.textContent = rec && reco && typeof reco.elapsed_s === "number"
+      ? "nach " + fmtClock(reco.elapsed_s) : "";
+
+    el.size.textContent = fmtBytes(d.file_size_bytes);
+    el.sizeSub.textContent = run ? base(run.output) : "";
+
+    var freeGb = typeof sys.disk_free_gb === "number" ? sys.disk_free_gb : null;
+    var rate = rec ? growthRate() : null;
+    el.disk.textContent = freeGb === null ? "–" : num(freeGb, 1) + " GB";
+    var est = freeGb === null ? "–" : fmtRemaining(freeGb * GIB, rate || FALLBACK_RATE);
+    if (est !== "–" && !rate) est += " (10 Mbit/s angenommen)";
+    el.diskSub.textContent = est === "–" ? "" : est;
+    setFlag(el.diskBox, "warn", freeGb !== null && freeGb < DISK_WARN_GB);
+
+    el.ram.textContent = memText(sys.mem_available_mb);
+    el.ramSub.textContent = typeof sys.mem_total_mb === "number" ? "von " + memText(sys.mem_total_mb) : "";
+
+    setTemp(el.cpu, el.cpuBox, temps.cpu);
+    setTemp(el.gpu, el.gpuBox, temps.gpu);
+    setTemp(el.cam, el.camBox, temps.camera);
+
+    el.load.textContent = typeof sys.loadavg === "number" ? num(sys.loadavg, 2) : "–";
+  }
+
+  function renderBanners(d, sys, temps, fpsNow, fpsLow) {
+    var list = [];
+    if (d.stale) {
+      list.push(["bad", "reco antwortet nicht – der Status wird seit über 5 s nicht aktualisiert."]);
+    }
+    if (fpsLow) {
+      list.push(["warn", "Bildrate niedrig: " + num(fpsNow, 1) + " fps (Soll 30)."]);
+    }
+    if (typeof sys.disk_free_gb === "number" && sys.disk_free_gb < DISK_WARN_GB) {
+      list.push(["warn", "Speicher fast voll: nur noch " + num(sys.disk_free_gb, 1) + " GB frei."]);
+    }
+    if (typeof temps.max === "number" && temps.max >= TEMP_CRIT) {
+      list.push(["bad", "Temperatur kritisch: " + num(temps.max, 1) + " °C."]);
+    }
+    renderBannerList(list);
+  }
+
+  function renderBannerList(list) {
+    el.banners.textContent = "";
+    list.forEach(function (item) {
+      var div = document.createElement("div");
+      div.className = "banner " + item[0];
+      div.textContent = item[1];
+      el.banners.appendChild(div);
+    });
+  }
+
+  function renderRecordings(list) {
+    var names = list.map(function (r) { return r.name; }).join("\n");
+    if (names !== recNames) {
+      recNames = names;
+      recMeta = {};
+      el.recs.textContent = "";
+      if (!list.length) {
+        var empty = document.createElement("li");
+        empty.className = "rec empty";
+        empty.textContent = "Noch keine Aufnahmen.";
+        el.recs.appendChild(empty);
+      }
+      list.forEach(function (r) {
+        var li = document.createElement("li");
+        li.className = "rec";
+        var info = document.createElement("div");
+        info.className = "rec-info";
+        var link = document.createElement("a");
+        link.className = "rec-name";
+        link.href = "/recordings/" + encodeURIComponent(r.name);
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = r.name;
+        var meta = document.createElement("div");
+        meta.className = "rec-meta";
+        info.appendChild(link);
+        info.appendChild(meta);
+        var dl = document.createElement("a");
+        dl.className = "rec-dl";
+        dl.href = "/recordings/" + encodeURIComponent(r.name) + "?download=1";
+        dl.setAttribute("aria-label", "Herunterladen: " + r.name);
+        dl.textContent = "⬇";
+        li.appendChild(info);
+        li.appendChild(dl);
+        el.recs.appendChild(li);
+        recMeta[r.name] = meta;
+      });
+    }
+    list.forEach(function (r) {
+      var meta = recMeta[r.name];
+      if (meta) meta.textContent = fmtBytes(r.size_bytes) + " · " + fmtDate(r.mtime_unix);
+    });
+  }
+
+  function renderLog(lines) {
+    var text = lines.length ? lines.join("\n") : "(noch keine Ausgabe)";
+    if (text === lastLog) return;
+    lastLog = text;
+    el.log.textContent = text;
+    if (el.logbox.open) el.log.scrollTop = el.log.scrollHeight;
+  }
+
+  function renderFooter(sys) {
+    var ips = sys.ips && sys.ips.length ? sys.ips.join(", ") : "keine IPv4-Adresse";
+    var uptime = typeof sys.uptime_s === "number" ? fmtDuration(sys.uptime_s) : "–";
+    el.footer.textContent = (sys.hostname || "Board") + " · " + ips + " · Laufzeit des Boards: " + uptime;
+  }
+
+  function updateClock() {
+    var st = lastData ? lastData.state : "";
+    var running = st === "recording" || st === "stopping";
+    if (!running || clock.started === null || !clock.serverNow) {
+      el.badgeTime.textContent = "";
+      return;
+    }
+    var now = clock.serverNow + (Date.now() - clock.localAt) / 1000;
+    el.badgeTime.textContent = fmtClock(now - clock.started);
+  }
+
+  function refreshPreview() {
+    if (!previewActive || previewLoading) return;
+    previewLoading = true;
+    var img = new Image();
+    var guard = setTimeout(function () { done(false); }, 5000);
+    function done(ok) {
+      clearTimeout(guard);
+      img.onload = null;
+      img.onerror = null;
+      previewLoading = false;
+      if (ok && previewActive) {
+        el.previewImg.src = img.src; // swap only once the new frame has loaded: no flicker
+        el.previewImg.hidden = false;
+        el.previewPh.hidden = true;
+        previewShown = true;
+      }
+    }
+    img.onload = function () { done(true); };
+    img.onerror = function () { done(false); };
+    img.src = "/preview.jpg?t=" + Date.now();
+  }
+
+  /* ---- actions ---- */
+
+  async function startRecording() {
+    if (busy) return;
+    var minutes = el.duration.value === "" ? null : parseInt(el.duration.value, 10);
+    var data = null;
+    setBusy(true);
+    try {
+      data = await api("/api/start", "POST", { quality: quality, minutes: minutes }, 10000);
+    } catch (e) {
+      showMsg(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+    if (data) {
+      showMsg("");
+      render(data);
+    }
+  }
+
+  async function stopRecording() {
+    if (busy) return;
+    if (!window.confirm("Aufnahme wirklich stoppen? Die Datei wird dabei abgeschlossen.")) return;
+    var data = null;
+    setBusy(true);
+    try {
+      data = await api("/api/stop", "POST", undefined, 10000);
+    } catch (e) {
+      showMsg(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+    if (data) {
+      showMsg("");
+      render(data);
+    }
+  }
+
+  el.startBtn.addEventListener("click", startRecording);
+  el.stopBtn.addEventListener("click", stopRecording);
+  qualityButtons.forEach(function (b) {
+    b.addEventListener("click", function () {
+      quality = b.getAttribute("data-q") || "balanced";
+      qualityButtons.forEach(function (x) {
+        x.setAttribute("aria-pressed", x === b ? "true" : "false");
+      });
+    });
+  });
+  el.preview.addEventListener("click", function () {
+    if (!el.previewImg.hidden) el.preview.classList.toggle("zoom");
+  });
+  el.logbox.addEventListener("toggle", function () {
+    if (el.logbox.open) el.log.scrollTop = el.log.scrollHeight;
+  });
+
+  setInterval(refreshPreview, 1000);
+  setInterval(updateClock, 500);
+  poll();
+})();
+</script>
+</body>
+</html>
