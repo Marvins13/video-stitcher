@@ -57,6 +57,8 @@ pub struct CameraRunConfig<'a> {
     pub replay_scale: Option<(u32, u32)>,
     /// RTMP stream URL for simultaneous file + stream output.
     pub stream_url: Option<&'a str>,
+    /// Directory for live dashboard files (`preview.jpg`, `status.json`).
+    pub dashboard_dir: Option<&'a str>,
     /// Use NVMM zero-copy capture (DMA-buf + NvBufSurfTransform).
     /// Auto-enabled on Tegra when NvBufSurfTransform is available.
     pub use_nvmm: bool,
@@ -95,6 +97,7 @@ pub fn run_camera(
         replay_path,
         replay_scale,
         stream_url,
+        dashboard_dir,
         use_nvmm,
         v4l2_direct,
         exposure: _exposure,
@@ -351,6 +354,12 @@ pub fn run_camera(
     println!("Encoder: {enc_name}");
 
     session.set_encoder(encoder, 2);
+
+    if let Some(dir) = dashboard_dir {
+        let sink = crate::dashboard::DashboardSink::new(Path::new(dir), output)?;
+        session.add_encoder(Box::new(sink), 2);
+        println!("Dashboard: writing preview + status to {dir}");
+    }
 
     let frame_limit =
         reco_core::session::types::compute_frame_limit(end_time, max_frames, capture_fps as f64);

@@ -7,6 +7,8 @@
 mod calibrate;
 #[cfg(feature = "gstreamer")]
 mod camera;
+#[cfg(feature = "gstreamer")]
+mod dashboard;
 mod helpers;
 #[cfg(feature = "libcamera")]
 mod libcamera_cmd;
@@ -409,6 +411,13 @@ enum Commands {
         /// YouTube RTMP compatibility.
         #[arg(long)]
         stream_url: Option<String>,
+
+        /// Directory for a live dashboard: about once per second reco
+        /// writes a downscaled `preview.jpg` and a `status.json` (frames,
+        /// fps, elapsed time) there. Use a tmpfs such as `/dev/shm/...`.
+        /// See `scripts/dashboard/` for a matching web UI.
+        #[arg(long)]
+        dashboard_dir: Option<String>,
 
         /// Tracking mode: `field` (ball + players, default), `ball`
         /// (ball only), `sweep` (no AI, slow pan; no --model needed).
@@ -869,6 +878,7 @@ fn main() -> anyhow::Result<()> {
             preset,
             container,
             stream_url,
+            dashboard_dir,
             tracking,
             unconstrained,
             replay,
@@ -937,6 +947,7 @@ fn main() -> anyhow::Result<()> {
                     replay_path: replay.as_deref(),
                     replay_scale,
                     stream_url: stream_url.as_deref(),
+                    dashboard_dir: dashboard_dir.as_deref(),
                     use_nvmm: !v4l2_direct && helpers::is_tegra() && {
                         #[cfg(target_os = "linux")]
                         {
