@@ -12,7 +12,7 @@ repository = "https://github.com/reco-project/video-stitcher"
 default = ["ffmpeg"]
 ffmpeg = ["dep:ffmpeg-next"]
 rpi = ["ffmpeg", "ffmpeg-next/rpi"]
-gstreamer = ["dep:gstreamer", "dep:gstreamer-app"]
+gstreamer = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 libcamera = []
 v4l2 = ["dep:libc"]
 profiling = ["tracing", "reco-core/profiling"]
@@ -38,6 +38,7 @@ ffmpeg-next = { version = "8", default-features = false, features = ["codec", "f
 # GStreamer backend
 gstreamer = { version = "0.25", optional = true }
 gstreamer-app = { version = "0.25", optional = true }
+gstreamer-video = { version = "0.25", optional = true }
 
 # Serde + serde_json are unconditional because `JsonlSink` (the
 # default shipping `PipelineEventSink`) serializes events to JSON

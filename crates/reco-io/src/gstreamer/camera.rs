@@ -6,19 +6,26 @@
 //!
 //! Supports two capture modes:
 //! - **I420** (YUV420P): three separate planes, works everywhere
-//! - **NV12**: Y + interleaved UV, native NVIDIA ISP output - skips
-//!   format conversion on Jetson for lower latency
+//! - **NV12**: Y + interleaved UV, native NVIDIA / Qualcomm ISP output -
+//!   skips format conversion on Jetson and Qualcomm boards for lower latency
+//!
+//! Supported capture elements: `nvarguscamerasrc` (Jetson), `qtiqmmfsrc`
+//! (Qualcomm camera service, e.g. QCS8300 / IQ-8275 boards), `avfvideosrc`
+//! (macOS), `mfvideosrc` (Windows) and `v4l2src` (generic Linux).
+//!
+//! Left and right frames are paired by capture timestamp, so a camera that
+//! starts late or drops a frame does not shift the pairing.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use gstreamer_video as gst_video;
 use reco_core::source::{
     FramePair, Nv12Data, Nv12FramePair, SourceError, SourceInfo, StereoFrame, YuvData,
 };
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 /// Camera capture configuration.
 #[derive(Debug, Clone)]
@@ -52,6 +59,7 @@ pub enum CaptureFormat {
 ///
 /// Accepted formats per platform:
 /// - Jetson (nvarguscamerasrc): numeric sensor ID only, e.g. `"0"`, `"1"`
+/// - Qualcomm (qtiqmmfsrc): numeric camera ID only, e.g. `"0"`, `"1"`
 /// - macOS (avfvideosrc): numeric device index only
 /// - Windows (mfvideosrc): numeric device index only
 /// - Linux V4L2: path matching `/dev/video<digits>`, e.g. `/dev/video0`
@@ -60,29 +68,39 @@ pub enum CaptureFormat {
 /// match the expected pattern, preventing injection of arbitrary GStreamer
 /// elements or shell metacharacters into the pipeline description.
 fn validate_device_string(device: &str) -> Result<(), String> {
-    if is_tegra() || cfg!(target_os = "macos") || cfg!(target_os = "windows") {
-        // Numeric index only (one or more digits, nothing else)
-        if device.chars().all(|c| c.is_ascii_digit()) && !device.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "invalid device string {device:?}: expected a numeric index (e.g. \"0\")"
-            ))
-        }
+    if is_tegra()
+        || is_qcom_camera_available()
+        || cfg!(target_os = "macos")
+        || cfg!(target_os = "windows")
+    {
+        validate_numeric_index(device)
     } else {
-        // Linux V4L2: must be exactly /dev/video<digits>
-        let valid = device.starts_with("/dev/video")
-            && device["/dev/video".len()..]
-                .chars()
-                .all(|c| c.is_ascii_digit())
-            && device.len() > "/dev/video".len();
-        if valid {
-            Ok(())
-        } else {
-            Err(format!(
-                "invalid device string {device:?}: expected a V4L2 path like \"/dev/video0\""
-            ))
-        }
+        validate_v4l2_path(device)
+    }
+}
+
+/// Numeric index only (one or more digits, nothing else).
+fn validate_numeric_index(device: &str) -> Result<(), String> {
+    if device.chars().all(|c| c.is_ascii_digit()) && !device.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid device string {device:?}: expected a numeric index (e.g. \"0\")"
+        ))
+    }
+}
+
+/// Linux V4L2: must be exactly `/dev/video<digits>`.
+fn validate_v4l2_path(device: &str) -> Result<(), String> {
+    let valid = device
+        .strip_prefix("/dev/video")
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid device string {device:?}: expected a V4L2 path like \"/dev/video0\""
+        ))
     }
 }
 
@@ -113,6 +131,19 @@ fn build_pipeline_string(
              nvvidconv ! \
              video/x-raw,format={fmt_str} ! \
              appsink name=sink emit-signals=false sync=false"
+        )
+    } else if is_qcom_camera_available() {
+        // Qualcomm: qtiqmmfsrc talks to the camera service (cam-server),
+        // which runs the ISP and emits NV12 (with padded scanlines, see
+        // `PlaneLayout`). I420 needs a CPU conversion; prefer NV12.
+        let convert = match format {
+            CaptureFormat::Nv12 => String::new(),
+            CaptureFormat::I420 => "videoconvert ! video/x-raw,format=I420 ! ".to_string(),
+        };
+        format!(
+            "qtiqmmfsrc camera={device} ! \
+             video/x-raw,format=NV12,width={width},height={height},framerate={fps}/1 ! \
+             {convert}appsink name=sink emit-signals=false sync=false"
         )
     } else if cfg!(target_os = "macos") {
         format!(
@@ -152,49 +183,282 @@ fn is_tegra() -> bool {
             .contains("nvidia,tegra")
 }
 
-/// Extract I420 planes from a GStreamer buffer.
-fn extract_i420(data: &[u8], width: u32, height: u32) -> Result<YuvData, SourceError> {
-    let y_size = (width * height) as usize;
-    let uv_size = ((width / 2) * (height / 2)) as usize;
+/// Detect a Qualcomm camera stack (`qtiqmmfsrc` from gstreamer1.0-plugins-qcom).
+///
+/// The result is cached: the plugin registry does not change at runtime.
+pub fn is_qcom_camera_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        !is_tegra() && gst::init().is_ok() && gst::ElementFactory::find("qtiqmmfsrc").is_some()
+    })
+}
 
-    if data.len() < y_size + 2 * uv_size {
-        return Err(SourceError::Read {
-            reason: format!(
-                "buffer too small: {} < {}",
-                data.len(),
-                y_size + 2 * uv_size
-            ),
-        });
+/// Byte layout of the planes inside a raw video buffer.
+///
+/// Many capture stacks pad rows (stride > width) or planes (e.g. Qualcomm
+/// aligns NV12 scanlines to 32 rows, so 2160p has its UV plane at
+/// `3840 * 2176`). The layout comes from the buffer's `GstVideoMeta`,
+/// falling back to the negotiated caps, then to tight packing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlaneLayout {
+    /// Byte offset of each plane from the start of the buffer.
+    offsets: [usize; 3],
+    /// Bytes per row of each plane.
+    strides: [usize; 3],
+}
+
+impl PlaneLayout {
+    /// Tightly packed layout (no padding) for `format`.
+    fn packed(format: CaptureFormat, width: u32, height: u32) -> Self {
+        let (w, h) = (width as usize, height as usize);
+        match format {
+            CaptureFormat::I420 => Self {
+                offsets: [0, w * h, w * h + (w / 2) * (h / 2)],
+                strides: [w, w / 2, w / 2],
+            },
+            CaptureFormat::Nv12 => Self {
+                offsets: [0, w * h, 0],
+                strides: [w, w, 0],
+            },
+        }
     }
 
+    /// Resolve the layout of `buffer`: `GstVideoMeta`, then caps, then packed.
+    fn resolve(
+        buffer: &gst::BufferRef,
+        caps: Option<&gst::CapsRef>,
+        format: CaptureFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, SourceError> {
+        let n_planes = match format {
+            CaptureFormat::I420 => 3,
+            CaptureFormat::Nv12 => 2,
+        };
+        let from_parts = |offsets: &[usize], strides: &[i32]| -> Result<Self, SourceError> {
+            if offsets.len() < n_planes || strides.len() < n_planes {
+                return Err(SourceError::Read {
+                    reason: format!(
+                        "video layout has {} planes, expected {n_planes}",
+                        offsets.len().min(strides.len())
+                    ),
+                });
+            }
+            let mut layout = Self {
+                offsets: [0; 3],
+                strides: [0; 3],
+            };
+            for i in 0..n_planes {
+                layout.offsets[i] = offsets[i];
+                layout.strides[i] = usize::try_from(strides[i]).map_err(|_| SourceError::Read {
+                    reason: format!("negative stride {} on plane {i}", strides[i]),
+                })?;
+            }
+            Ok(layout)
+        };
+
+        if let Some(meta) = buffer.meta::<gst_video::VideoMeta>() {
+            return from_parts(meta.offset(), meta.stride());
+        }
+        if let Some(info) = caps.and_then(|c| gst_video::VideoInfo::from_caps(c).ok()) {
+            return from_parts(info.offset(), info.stride());
+        }
+        Ok(Self::packed(format, width, height))
+    }
+}
+
+/// Copy `rows` rows of `row_bytes` bytes from a plane at `offset` with
+/// `stride` bytes per row into a tightly packed `Vec`.
+fn copy_plane(
+    data: &[u8],
+    offset: usize,
+    stride: usize,
+    row_bytes: usize,
+    rows: usize,
+    plane: &str,
+) -> Result<Vec<u8>, SourceError> {
+    if rows == 0 || row_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    if stride < row_bytes {
+        return Err(SourceError::Read {
+            reason: format!("{plane} plane stride {stride} < row size {row_bytes}"),
+        });
+    }
+    let end = offset + stride * (rows - 1) + row_bytes;
+    if data.len() < end {
+        return Err(SourceError::Read {
+            reason: format!("buffer too small for {plane} plane: {} < {end}", data.len()),
+        });
+    }
+    if stride == row_bytes {
+        return Ok(data[offset..end].to_vec());
+    }
+    let mut out = Vec::with_capacity(row_bytes * rows);
+    for row in 0..rows {
+        let start = offset + row * stride;
+        out.extend_from_slice(&data[start..start + row_bytes]);
+    }
+    Ok(out)
+}
+
+/// Extract I420 planes from a GStreamer buffer.
+fn extract_i420(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    layout: &PlaneLayout,
+) -> Result<YuvData, SourceError> {
+    let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (w / 2, h / 2);
     Ok(YuvData {
-        y: data[..y_size].to_vec(),
-        u: data[y_size..y_size + uv_size].to_vec(),
-        v: data[y_size + uv_size..y_size + 2 * uv_size].to_vec(),
+        y: copy_plane(data, layout.offsets[0], layout.strides[0], w, h, "Y")?,
+        u: copy_plane(data, layout.offsets[1], layout.strides[1], cw, ch, "U")?,
+        v: copy_plane(data, layout.offsets[2], layout.strides[2], cw, ch, "V")?,
     })
 }
 
 /// Extract NV12 planes from a GStreamer buffer.
 ///
-/// NV12 layout: Y plane (width*height), then interleaved UV plane (width*height/2).
-fn extract_nv12(data: &[u8], width: u32, height: u32) -> Result<Nv12Data, SourceError> {
-    let y_size = (width * height) as usize;
-    let uv_size = (width * (height / 2)) as usize;
+/// NV12 layout: Y plane (width x height), then interleaved UV plane
+/// (width x height/2). Output planes are tightly packed.
+fn extract_nv12(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    layout: &PlaneLayout,
+) -> Result<Nv12Data, SourceError> {
+    let (w, h) = (width as usize, height as usize);
+    Ok(Nv12Data {
+        y: copy_plane(data, layout.offsets[0], layout.strides[0], w, h, "Y")?,
+        uv: copy_plane(data, layout.offsets[1], layout.strides[1], w, h / 2, "UV")?,
+    })
+}
 
-    if data.len() < y_size + uv_size {
-        return Err(SourceError::Read {
-            reason: format!(
-                "NV12 buffer too small: {} < {}",
-                data.len(),
-                y_size + uv_size
-            ),
-        });
+/// Log the plane layout of a camera's first buffer (diagnoses padding issues).
+fn log_first_buffer(label: &str, buffer: &gst::BufferRef, layout: &PlaneLayout) {
+    log::info!(
+        "{label}: first buffer {} bytes, video meta: {}, plane offsets {:?}, strides {:?}",
+        buffer.size(),
+        if buffer.meta::<gst_video::VideoMeta>().is_some() {
+            "yes"
+        } else {
+            "no"
+        },
+        layout.offsets,
+        layout.strides,
+    );
+}
+
+/// A captured frame plus its capture time on the system clock.
+struct Timestamped<T> {
+    /// Absolute capture time in nanoseconds (pipeline base time + PTS),
+    /// or `None` if the source did not timestamp the buffer.
+    time_ns: Option<u64>,
+    data: T,
+}
+
+/// Absolute capture time of `buffer` on the pipeline clock.
+///
+/// All capture pipelines are forced onto the shared system clock (see
+/// [`build_capture_pipeline`]), so these times are comparable across
+/// cameras.
+fn capture_time_ns(pipeline: &gst::Pipeline, buffer: &gst::BufferRef) -> Option<u64> {
+    let pts = buffer.pts()?;
+    let base = pipeline.base_time()?;
+    Some((base + pts).nseconds())
+}
+
+/// Pair left/right frames by capture timestamp and hand each pair to `emit`.
+///
+/// Two frames form a pair when their timestamps differ by at most
+/// `tolerance_ns` (half a frame period); otherwise the older frame is
+/// dropped. Frames without timestamps are paired in arrival order. If no
+/// pair is found within `max_consecutive_drops` drops (e.g. the cameras
+/// report times on unrelated clocks), pairing falls back to arrival order.
+///
+/// Returns when either channel closes or `emit` returns `false`.
+fn pair_by_timestamp<T>(
+    left_rx: &mpsc::Receiver<Timestamped<T>>,
+    right_rx: &mpsc::Receiver<Timestamped<T>>,
+    tolerance_ns: u64,
+    max_consecutive_drops: u32,
+    mut emit: impl FnMut(T, T) -> bool,
+) {
+    let (Ok(mut left), Ok(mut right)) = (left_rx.recv(), right_rx.recv()) else {
+        return;
+    };
+    let mut use_timestamps = true;
+    let mut consecutive_drops = 0u32;
+    let (mut dropped_left, mut dropped_right) = (0u64, 0u64);
+    let mut first_pair = true;
+
+    loop {
+        if use_timestamps
+            && let (Some(lt), Some(rt)) = (left.time_ns, right.time_ns)
+            && lt.abs_diff(rt) > tolerance_ns
+        {
+            consecutive_drops += 1;
+            if consecutive_drops > max_consecutive_drops {
+                log::warn!(
+                    "camera pairing: no frames within {:.1} ms after {consecutive_drops} \
+                     drops (left-right = {:.1} ms); pairing in arrival order instead",
+                    tolerance_ns as f64 / 1e6,
+                    (lt as f64 - rt as f64) / 1e6,
+                );
+                use_timestamps = false;
+            } else {
+                let replaced = if lt < rt {
+                    dropped_left += 1;
+                    left_rx.recv()
+                } else {
+                    dropped_right += 1;
+                    right_rx.recv()
+                };
+                let Ok(next) = replaced else { break };
+                if lt < rt {
+                    left = next;
+                } else {
+                    right = next;
+                }
+                continue;
+            }
+        }
+
+        consecutive_drops = 0;
+        if first_pair {
+            first_pair = false;
+            match (left.time_ns, right.time_ns) {
+                (Some(lt), Some(rt)) => log::info!(
+                    "camera pairing: first pair, left-right offset {:.1} ms \
+                     (dropped {dropped_left} left / {dropped_right} right frames to align)",
+                    (lt as f64 - rt as f64) / 1e6
+                ),
+                _ => log::info!("camera pairing: no capture timestamps, pairing in arrival order"),
+            }
+        }
+        if !emit(left.data, right.data) {
+            break;
+        }
+        match (left_rx.recv(), right_rx.recv()) {
+            (Ok(l), Ok(r)) => (left, right) = (l, r),
+            _ => break,
+        }
     }
 
-    Ok(Nv12Data {
-        y: data[..y_size].to_vec(),
-        uv: data[y_size..y_size + uv_size].to_vec(),
-    })
+    log::info!(
+        "camera pairing stopped: dropped {dropped_left} left / {dropped_right} right frames"
+    );
+}
+
+/// Pairing tolerance: half a frame period at `fps`.
+fn pairing_tolerance_ns(fps: u32) -> u64 {
+    1_000_000_000 / (2 * u64::from(fps.max(1)))
+}
+
+/// Give up on timestamp pairing after this many seconds without a match.
+fn pairing_max_drops(fps: u32) -> u32 {
+    2 * fps.max(1)
 }
 
 /// Build and start a GStreamer pipeline, returning the pipeline and appsink.
@@ -213,6 +477,13 @@ fn build_capture_pipeline(
     let pipeline_str = build_pipeline_string(device, width, height, fps, format)?;
     log::info!("{label} pipeline: {pipeline_str}");
 
+    // Create and start one camera pipeline at a time. qtiqmmfsrc fails
+    // (set_state -> FAILURE, sometimes for both cameras) when two capture
+    // threads create their pipelines concurrently; serialising costs only
+    // milliseconds and is harmless for the other capture elements.
+    static START_LOCK: Mutex<()> = Mutex::new(());
+    let _start_guard = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let pipeline = gst::parse::launch(&pipeline_str)
         .map_err(|e| format!("{label} pipeline parse: {e}"))?
         .downcast::<gst::Pipeline>()
@@ -226,6 +497,10 @@ fn build_capture_pipeline(
 
     appsink.set_max_buffers(2);
     appsink.set_drop(true);
+
+    // Run every camera pipeline on the shared system clock so that
+    // base_time + PTS is comparable between the left and right camera.
+    pipeline.use_clock(Some(&gst::SystemClock::obtain()));
 
     pipeline
         .set_state(gst::State::Playing)
@@ -241,8 +516,8 @@ fn spawn_capture_thread(
     width: u32,
     height: u32,
     fps: u32,
-) -> mpsc::Receiver<YuvData> {
-    let (tx, rx) = mpsc::sync_channel::<YuvData>(2);
+) -> mpsc::Receiver<Timestamped<YuvData>> {
+    let (tx, rx) = mpsc::sync_channel::<Timestamped<YuvData>>(2);
 
     std::thread::Builder::new()
         .name(format!("capture_{label}"))
@@ -262,6 +537,7 @@ fn spawn_capture_thread(
                 }
             };
 
+            let mut layout_logged = false;
             loop {
                 let sample = match appsink.pull_sample() {
                     Ok(s) => s,
@@ -273,14 +549,33 @@ fn spawn_capture_thread(
                     break;
                 };
 
+                let layout = match PlaneLayout::resolve(
+                    buffer,
+                    sample.caps(),
+                    CaptureFormat::I420,
+                    width,
+                    height,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("{label}: {e}");
+                        break;
+                    }
+                };
+                if !layout_logged {
+                    layout_logged = true;
+                    log_first_buffer(label, buffer, &layout);
+                }
+                let time_ns = capture_time_ns(&pipeline, buffer);
+
                 let Ok(map) = buffer.map_readable() else {
                     log::error!("{label}: buffer map failed");
                     break;
                 };
 
-                match extract_i420(map.as_slice(), width, height) {
-                    Ok(yuv) => {
-                        if tx.send(yuv).is_err() {
+                match extract_i420(map.as_slice(), width, height, &layout) {
+                    Ok(data) => {
+                        if tx.send(Timestamped { time_ns, data }).is_err() {
                             break;
                         }
                     }
@@ -309,8 +604,8 @@ fn spawn_nv12_capture_thread(
     height: u32,
     fps: u32,
     stop: Arc<AtomicBool>,
-) -> mpsc::Receiver<Nv12Data> {
-    let (tx, rx) = mpsc::sync_channel::<Nv12Data>(2);
+) -> mpsc::Receiver<Timestamped<Nv12Data>> {
+    let (tx, rx) = mpsc::sync_channel::<Timestamped<Nv12Data>>(2);
 
     std::thread::Builder::new()
         .name(format!("capture_{label}"))
@@ -330,6 +625,7 @@ fn spawn_nv12_capture_thread(
                 }
             };
 
+            let mut layout_logged = false;
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -345,14 +641,33 @@ fn spawn_nv12_capture_thread(
                     break;
                 };
 
+                let layout = match PlaneLayout::resolve(
+                    buffer,
+                    sample.caps(),
+                    CaptureFormat::Nv12,
+                    width,
+                    height,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("{label}: {e}");
+                        break;
+                    }
+                };
+                if !layout_logged {
+                    layout_logged = true;
+                    log_first_buffer(label, buffer, &layout);
+                }
+                let time_ns = capture_time_ns(&pipeline, buffer);
+
                 let Ok(map) = buffer.map_readable() else {
                     log::error!("{label}: buffer map failed");
                     break;
                 };
 
-                match extract_nv12(map.as_slice(), width, height) {
-                    Ok(nv12) => {
-                        if tx.send(nv12).is_err() {
+                match extract_nv12(map.as_slice(), width, height, &layout) {
+                    Ok(data) => {
+                        if tx.send(Timestamped { time_ns, data }).is_err() {
                             break;
                         }
                     }
@@ -410,15 +725,19 @@ impl GstreamerCameraSource {
         );
 
         let (tx, rx) = mpsc::sync_channel::<FramePair>(2);
+        let tolerance_ns = pairing_tolerance_ns(config.fps);
+        let max_drops = pairing_max_drops(config.fps);
 
         std::thread::Builder::new()
             .name("capture_pair".into())
             .spawn(move || {
-                while let (Ok(left), Ok(right)) = (left_rx.recv(), right_rx.recv()) {
-                    if tx.send(FramePair { left, right }).is_err() {
-                        break;
-                    }
-                }
+                pair_by_timestamp(
+                    &left_rx,
+                    &right_rx,
+                    tolerance_ns,
+                    max_drops,
+                    |left, right| tx.send(FramePair { left, right }).is_ok(),
+                );
             })
             .expect("spawn pairing thread");
 
@@ -496,15 +815,19 @@ impl GstreamerNv12CameraSource {
         );
 
         let (tx, rx) = mpsc::sync_channel::<Nv12FramePair>(2);
+        let tolerance_ns = pairing_tolerance_ns(config.fps);
+        let max_drops = pairing_max_drops(config.fps);
 
         std::thread::Builder::new()
             .name("capture_pair".into())
             .spawn(move || {
-                while let (Ok(left), Ok(right)) = (left_rx.recv(), right_rx.recv()) {
-                    if tx.send(Nv12FramePair { left, right }).is_err() {
-                        break;
-                    }
-                }
+                pair_by_timestamp(
+                    &left_rx,
+                    &right_rx,
+                    tolerance_ns,
+                    max_drops,
+                    |left, right| tx.send(Nv12FramePair { left, right }).is_ok(),
+                );
             })
             .expect("spawn pairing thread");
 
@@ -833,52 +1156,253 @@ mod nvmm_source {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_device_string;
+    use super::*;
 
-    // Helper: on non-Jetson Linux builds (the CI environment), V4L2 rules apply.
-    // On macOS/Windows CI the numeric rules apply. We test the logic that is
-    // actually compiled in, plus explicitly call the Tegra/numeric branch via
-    // the shared predicate (numeric-only) which is the same for all three
-    // non-V4L2 platforms.
+    // The platform dispatch in `validate_device_string` depends on the
+    // machine (Tegra, Qualcomm camera plugin, OS), so the two rule sets
+    // are tested directly.
 
-    /// Numeric strings must be accepted on every non-V4L2 platform.
+    /// Numeric strings are valid indices (Jetson, Qualcomm, macOS, Windows).
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn numeric_index_accepted() {
-        assert!(validate_device_string("0").is_ok());
-        assert!(validate_device_string("1").is_ok());
-        assert!(validate_device_string("12").is_ok());
+        assert!(validate_numeric_index("0").is_ok());
+        assert!(validate_numeric_index("1").is_ok());
+        assert!(validate_numeric_index("12").is_ok());
     }
 
-    /// Non-numeric strings must be rejected on macOS/Windows.
+    /// Non-numeric strings and injection attempts are rejected as indices.
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn non_numeric_rejected_on_non_linux() {
-        assert!(validate_device_string("").is_err());
-        assert!(validate_device_string("cam0").is_err());
-        assert!(validate_device_string("0 ! fakesrc").is_err());
-        assert!(validate_device_string("/dev/video0").is_err());
+    fn non_numeric_index_rejected() {
+        assert!(validate_numeric_index("").is_err());
+        assert!(validate_numeric_index("cam0").is_err());
+        assert!(validate_numeric_index("0 ! fakesrc").is_err());
+        assert!(validate_numeric_index("/dev/video0").is_err());
     }
 
-    /// Valid V4L2 paths must be accepted on Linux (non-Tegra).
+    /// Valid V4L2 paths are accepted.
     #[test]
-    #[cfg(target_os = "linux")]
     fn v4l2_path_accepted() {
-        assert!(validate_device_string("/dev/video0").is_ok());
-        assert!(validate_device_string("/dev/video1").is_ok());
-        assert!(validate_device_string("/dev/video10").is_ok());
+        assert!(validate_v4l2_path("/dev/video0").is_ok());
+        assert!(validate_v4l2_path("/dev/video1").is_ok());
+        assert!(validate_v4l2_path("/dev/video10").is_ok());
     }
 
-    /// Injection attempts and malformed paths must be rejected on Linux.
+    /// Injection attempts and malformed paths are rejected as V4L2 paths.
     #[test]
-    #[cfg(target_os = "linux")]
-    fn injection_rejected_on_linux() {
-        assert!(validate_device_string("").is_err());
-        assert!(validate_device_string("/dev/video").is_err()); // no trailing digit
-        assert!(validate_device_string("/dev/video0 ! fakesrc").is_err());
-        assert!(validate_device_string("0").is_err()); // numeric-only not valid for V4L2
-        assert!(validate_device_string("/dev/video0a").is_err());
-        assert!(validate_device_string("/dev/../etc/passwd").is_err());
-        assert!(validate_device_string("video0").is_err());
+    fn v4l2_injection_rejected() {
+        assert!(validate_v4l2_path("").is_err());
+        assert!(validate_v4l2_path("/dev/video").is_err()); // no trailing digit
+        assert!(validate_v4l2_path("/dev/video0 ! fakesrc").is_err());
+        assert!(validate_v4l2_path("0").is_err()); // numeric-only not valid for V4L2
+        assert!(validate_v4l2_path("/dev/video0a").is_err());
+        assert!(validate_v4l2_path("/dev/../etc/passwd").is_err());
+        assert!(validate_v4l2_path("video0").is_err());
+    }
+
+    /// Qualcomm pipeline uses qtiqmmfsrc with the numeric camera ID.
+    #[test]
+    fn qcom_pipeline_string() {
+        if !is_qcom_camera_available() {
+            return; // not a Qualcomm camera stack
+        }
+        let p = build_pipeline_string("1", 3840, 2160, 30, CaptureFormat::Nv12).unwrap();
+        assert!(p.starts_with("qtiqmmfsrc camera=1 ! "), "{p}");
+        assert!(p.contains("format=NV12,width=3840,height=2160,framerate=30/1"));
+        assert!(!p.contains("videoconvert"));
+        assert!(build_pipeline_string("0 ! fakesrc", 64, 64, 30, CaptureFormat::Nv12).is_err());
+    }
+
+    /// Build a synthetic NV12 buffer with padded rows/scanlines. Each
+    /// valid byte encodes its plane and position; padding is 0xEE.
+    fn padded_nv12(w: usize, h: usize, stride: usize, scanlines: usize) -> Vec<u8> {
+        let mut buf = vec![0xEE; stride * scanlines + stride * (h / 2)];
+        for r in 0..h {
+            for c in 0..w {
+                buf[r * stride + c] = ((r * 7 + c) % 200) as u8;
+            }
+        }
+        let uv_off = stride * scanlines;
+        for r in 0..h / 2 {
+            for c in 0..w {
+                buf[uv_off + r * stride + c] = 200 + ((r + c) % 50) as u8;
+            }
+        }
+        buf
+    }
+
+    /// Qualcomm-style layout: UV plane after 32-row-aligned scanlines.
+    #[test]
+    fn nv12_padded_scanlines() {
+        let (w, h) = (16usize, 6usize);
+        let buf = padded_nv12(w, h, w, 8);
+        let layout = PlaneLayout {
+            offsets: [0, w * 8, 0],
+            strides: [w, w, 0],
+        };
+        let nv12 = extract_nv12(&buf, w as u32, h as u32, &layout).unwrap();
+        assert_eq!(nv12.y.len(), w * h);
+        assert_eq!(nv12.uv.len(), w * h / 2);
+        assert!(nv12.y.iter().all(|&b| b < 200));
+        assert!(nv12.uv.iter().all(|&b| (200..250).contains(&b)));
+        assert_eq!(nv12.uv[0], 200);
+    }
+
+    /// Row padding (stride > width) is stripped from every row.
+    #[test]
+    fn nv12_padded_stride() {
+        let (w, h, stride) = (10usize, 4usize, 16usize);
+        let buf = padded_nv12(w, h, stride, h);
+        let layout = PlaneLayout {
+            offsets: [0, stride * h, 0],
+            strides: [stride, stride, 0],
+        };
+        let nv12 = extract_nv12(&buf, w as u32, h as u32, &layout).unwrap();
+        assert_eq!(nv12.y.len(), w * h);
+        assert!(!nv12.y.contains(&0xEE));
+        assert!(!nv12.uv.contains(&0xEE));
+        assert_eq!(nv12.y[w], 7); // row 1, col 0
+    }
+
+    /// Tightly packed layouts round-trip, and short buffers are rejected.
+    #[test]
+    fn packed_layouts() {
+        let (w, h) = (8u32, 4u32);
+        let i420 = vec![1u8; 8 * 4 * 3 / 2];
+        let yuv =
+            extract_i420(&i420, w, h, &PlaneLayout::packed(CaptureFormat::I420, w, h)).unwrap();
+        assert_eq!((yuv.y.len(), yuv.u.len(), yuv.v.len()), (32, 8, 8));
+
+        let nv12 = vec![1u8; 8 * 4 * 3 / 2];
+        let layout = PlaneLayout::packed(CaptureFormat::Nv12, w, h);
+        assert!(extract_nv12(&nv12, w, h, &layout).is_ok());
+        assert!(extract_nv12(&nv12[..40], w, h, &layout).is_err());
+    }
+
+    /// Layout is read from GstVideoMeta when the buffer carries one.
+    #[test]
+    fn layout_from_video_meta() {
+        gst::init().unwrap();
+        let (w, h) = (16u32, 6u32);
+        let mut buffer = gst::Buffer::with_size(16 * 8 + 16 * 3).unwrap();
+        gst_video::VideoMeta::add_full(
+            buffer.get_mut().unwrap(),
+            gst_video::VideoFrameFlags::empty(),
+            gst_video::VideoFormat::Nv12,
+            w,
+            h,
+            &[0, 16 * 8],
+            &[16, 16],
+        )
+        .unwrap();
+        let layout = PlaneLayout::resolve(&buffer, None, CaptureFormat::Nv12, w, h).unwrap();
+        assert_eq!(layout.offsets[..2], [0, 128]);
+        assert_eq!(layout.strides[..2], [16, 16]);
+
+        // No meta, no caps -> tightly packed.
+        let plain = gst::Buffer::with_size(16 * 9).unwrap();
+        let layout = PlaneLayout::resolve(&plain, None, CaptureFormat::Nv12, w, h).unwrap();
+        assert_eq!(layout, PlaneLayout::packed(CaptureFormat::Nv12, w, h));
+    }
+
+    const FRAME_NS: u64 = 33_333_333;
+
+    /// Feed timestamped frames and collect the emitted (left, right) pairs.
+    fn run_pairing(
+        left: &[Option<u64>],
+        right: &[Option<u64>],
+        max_drops: u32,
+    ) -> Vec<(usize, usize)> {
+        let (ltx, lrx) = mpsc::sync_channel(left.len().max(1));
+        let (rtx, rrx) = mpsc::sync_channel(right.len().max(1));
+        for (i, &t) in left.iter().enumerate() {
+            ltx.send(Timestamped {
+                time_ns: t,
+                data: i,
+            })
+            .unwrap();
+        }
+        for (i, &t) in right.iter().enumerate() {
+            rtx.send(Timestamped {
+                time_ns: t,
+                data: i,
+            })
+            .unwrap();
+        }
+        drop((ltx, rtx));
+        let mut pairs = Vec::new();
+        pair_by_timestamp(&lrx, &rrx, FRAME_NS / 2, max_drops, |l, r| {
+            pairs.push((l, r));
+            true
+        });
+        pairs
+    }
+
+    fn times(start_ns: u64, n: usize) -> Vec<Option<u64>> {
+        (0..n)
+            .map(|i| Some(start_ns + i as u64 * FRAME_NS))
+            .collect()
+    }
+
+    /// A constant 20 ms phase offset (measured on the IMX577 pair)
+    /// pairs each frame with its nearest partner.
+    #[test]
+    fn pairs_with_phase_offset() {
+        let left = times(1_000_000_000 + 20_000_000, 5);
+        let right = times(1_000_000_000, 6);
+        // left[0] is 20 ms after right[0] (> 16.7 ms) but 13 ms before right[1].
+        assert_eq!(
+            run_pairing(&left, &right, 60),
+            vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
+        );
+    }
+
+    /// A camera that starts 2 s late: early frames of the other are dropped.
+    #[test]
+    fn late_camera_start_is_aligned() {
+        let left = times(1_000_000_000, 70); // starts at 1.0 s
+        let right = times(1_000_000_000 + 60 * FRAME_NS, 5); // starts 2 s later
+        assert_eq!(
+            run_pairing(&left, &right, 100),
+            vec![(60, 0), (61, 1), (62, 2), (63, 3), (64, 4)]
+        );
+    }
+
+    /// A dropped right frame drops exactly one left frame.
+    #[test]
+    fn dropped_frame_realigns() {
+        let left = times(0, 5);
+        let mut right = times(0, 5);
+        right.remove(2); // right skips frame 2
+        assert_eq!(
+            run_pairing(&left, &right, 60),
+            vec![(0, 0), (1, 1), (3, 2), (4, 3)]
+        );
+    }
+
+    /// Missing timestamps pair in arrival order.
+    #[test]
+    fn no_timestamps_pairs_in_order() {
+        assert_eq!(
+            run_pairing(&[None, None, None], &[None, None], 60),
+            vec![(0, 0), (1, 1)]
+        );
+    }
+
+    /// Unrelated clocks (offset never closes) fall back to arrival order.
+    #[test]
+    fn unrelated_clocks_fall_back() {
+        let left = times(0, 10);
+        let right = times(1_000_000_000_000, 10);
+        let pairs = run_pairing(&left, &right, 3);
+        // 3 left frames are dropped before giving up, then in-order pairing.
+        assert_eq!(pairs.first(), Some(&(3, 0)));
+        assert_eq!(pairs.len(), 7);
+    }
+
+    /// Half a frame period.
+    #[test]
+    fn tolerance_is_half_period() {
+        assert_eq!(pairing_tolerance_ns(30), 16_666_666);
+        assert_eq!(pairing_tolerance_ns(0), 500_000_000);
     }
 }
