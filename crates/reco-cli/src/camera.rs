@@ -123,7 +123,11 @@ pub fn run_camera(
     let (use_nv12_capture, input_format) = if v4l2_direct {
         // V4L2 direct: raw Bayer -> GPU demosaic -> RGBA -> stitch via BGRA path.
         (true, reco_core::render::renderer::InputFormat::Bgra)
-    } else if use_nvmm || helpers::is_tegra() {
+    } else if use_nvmm
+        || helpers::is_tegra()
+        || reco_io::gstreamer::camera::is_qcom_camera_available()
+    {
+        // Jetson and Qualcomm ISPs emit NV12 natively.
         (true, reco_core::render::renderer::InputFormat::Nv12)
     } else {
         (false, reco_core::render::renderer::InputFormat::Yuv420p)

@@ -317,7 +317,8 @@ enum Commands {
     /// Stitch live camera feeds in real time.
     #[cfg(feature = "gstreamer")]
     Camera {
-        /// Left camera device (sensor ID on Jetson, e.g. "0"; device path on Linux, e.g. "/dev/video0").
+        /// Left camera device (sensor ID on Jetson and Qualcomm boards, e.g. "0";
+        /// device path on other Linux systems, e.g. "/dev/video0").
         #[arg(long)]
         left_device: String,
 
